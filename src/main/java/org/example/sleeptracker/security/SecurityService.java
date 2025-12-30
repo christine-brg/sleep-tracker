@@ -7,6 +7,7 @@ import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 import org.example.sleeptracker.exceptions.JwtAuthenticationException;
+import org.example.sleeptracker.models.TokenType;
 import org.example.sleeptracker.models.User;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -17,64 +18,109 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Function;
 
+import static org.example.sleeptracker.models.TokenType.ACCESS_TOKEN;
+import static org.example.sleeptracker.models.TokenType.REFRESH_TOKEN;
+
 @Service
 public class SecurityService {
 
     @Value("${jwt.token.access-token.secret}")
-    private String secretKey;
+    private String accessTokenSecretKey;
+
+    @Value("${jwt.token.refresh-token.secret}")
+    private String refreshTokenSecretKey;
 
     @Value("${jwt.token.validity.in-millis}")
-    private Long tokenValidityInMillis;
+    private long jwtAccessTokenValidityInMillis;
 
-    public String createToken(User user) {
+    @Value("${jwt.token.refresh-token.validity-in-millis}")
+    private long jwtRefreshTokenValidityInMillis;
+
+    public String createAccessToken(User user) {
         Map<String, String> claims = new HashMap<>();
         claims.put("role", user.getRole().name());
         claims.put("username", user.getUsername());
 
-        return generateToken(claims, user.getUsername());
+        return generateToken(claims, user.getUsername(), ACCESS_TOKEN);
+    }
+
+    public String createRefreshToken(User user) {
+        return generateToken(new HashMap<>(), user.getUsername(), REFRESH_TOKEN);
     }
 
     public String getUsername(String token) {
-        return getClaim(token, Claims::getSubject);
+        return getUsername(token, ACCESS_TOKEN);
+    }
+
+    public String getUsername(String token, TokenType tokenType) {
+        return getClaim(token, Claims::getSubject, tokenType);
     }
 
     public boolean isTokenValid(String token) {
+        return isTokenValid(token, ACCESS_TOKEN);
+    }
+
+    public boolean isTokenValid(String token, TokenType tokenType) {
         try {
-            Date expiration = getClaim(token, Claims::getExpiration);
-            return expiration.after(new Date());
+            Date tokenExpirationDate = getClaim(token, Claims::getExpiration, tokenType);
+            return tokenExpirationDate.after(new Date());
         } catch (JwtException | IllegalArgumentException e) {
-            throw new JwtAuthenticationException("Invalid JWT token: " + e.getMessage());
+            if (e.getMessage().startsWith("JWT signature does not match locally computed signature.")) {
+                throw new JwtAuthenticationException("Jwt token is invalid");
+            }
+            throw new JwtAuthenticationException(e.getMessage());
         }
     }
 
-    private String generateToken(Map<String, String> claims, String subject) {
-        Date issuedAt = new Date();
-        Date expiration = new Date(issuedAt.getTime() + tokenValidityInMillis);
+    private String generateToken(Map<String, String> claims, String username, TokenType tokenType) {
+        Date tokenStartDate = new Date();
+        long validity = (tokenType == ACCESS_TOKEN)
+                ? jwtAccessTokenValidityInMillis
+                : jwtRefreshTokenValidityInMillis;
+
+        Date tokenEndDate = new Date(tokenStartDate.getTime() + validity);
 
         return Jwts.builder()
                 .setClaims(claims)
-                .setSubject(subject)
-                .setIssuedAt(issuedAt)
-                .setExpiration(expiration)
-                .signWith(getSigningKey(), SignatureAlgorithm.HS256)
+                .setIssuedAt(tokenStartDate)
+                .setExpiration(tokenEndDate)
+                .setSubject(username)
+                .signWith(getSigningKey(tokenType), SignatureAlgorithm.HS256)
                 .compact();
     }
 
-    private <T> T getClaim(String token, Function<Claims, T> claimsResolver) {
-        final Claims claims = parseToken(token);
-        return claimsResolver.apply(claims);
+    private <T> T getClaim(String token, Function<Claims, T> claimExtractor, TokenType tokenType) {
+        final Claims claims = getAllClaims(token, tokenType);
+        return claimExtractor.apply(claims);
     }
 
-    private Claims parseToken(String token) {
+    private Key getSigningKey(TokenType tokenType) {
+        String tokenSecretKey = getTokenSecret(tokenType);
+        byte[] keyBytes = Decoders.BASE64.decode(tokenSecretKey);
+        return Keys.hmacShaKeyFor(keyBytes);
+    }
+
+    private Claims getAllClaims(String token, TokenType tokenType) {
         return Jwts.parserBuilder()
-                .setSigningKey(getSigningKey())
+                .setSigningKey(getSigningKey(tokenType))
                 .build()
                 .parseClaimsJws(token)
                 .getBody();
     }
 
-    private Key getSigningKey() {
-        byte[] keyBytes = Decoders.BASE64.decode(secretKey);
-        return Keys.hmacShaKeyFor(keyBytes);
+    private String getTokenSecret(TokenType tokenType) {
+        String tokenSecretKey;
+        if (tokenType == ACCESS_TOKEN) {
+            tokenSecretKey = accessTokenSecretKey;
+        } else {
+            tokenSecretKey = refreshTokenSecretKey;
+        }
+        return tokenSecretKey;
+    }
+
+    public long getTokenRemainingSeconds(String token, TokenType tokenType) {
+        Date expiration = getClaim(token, Claims::getExpiration, tokenType);
+        long remainingMillis = expiration.getTime() - System.currentTimeMillis();
+        return Math.max(remainingMillis / 1000, 0);
     }
 }

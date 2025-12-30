@@ -1,0 +1,2 @@
+INSERT INTO users (username, email, password, phone_number, enabled, role, created_at)
+VALUES ('admin', 'admin@gmail.com', '$2a$12$bSNU3deLMGi8Se4odA1VE.Za46ArKfuYUEatgMdbUzmefMGbqs/DW','+37367000000', true, 'ADMIN', NOW());
